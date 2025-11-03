@@ -1,0 +1,26 @@
+[
+  {
+    "id": "agent_test_basic",
+    "name": "AI 에이전트 테스트 - 기본 분석",
+    "description": "AI 에이전트가 자율적으로 관련 파일을 읽는 능력 테스트",
+    "type": "single",
+    "priority": 1,
+    "prompt": "test_agent 디렉토리에 있는 main.py 파일을 분석해주세요. 다음 내용을 이해하고 싶습니다:\n1. 이 애플리케이션은 무엇을 하나요?\n2. 사용되는 모든 함수는 무엇인가요? (다른 모듈에서 import된 함수 포함)\n3. 어떤 설정값들이 사용되나요?\n4. 애플리케이션의 완전한 흐름도를 제공해주세요.\n\n참고: 완전한 분석을 위해서는 관련 파일들을 읽어야 합니다. 파일 읽기 도구를 사용하여 코드베이스를 탐색하세요.\n\n**중요: 모든 응답은 한국어로 작성해주세요.**"
+  },
+  {
+    "id": "agent_test_detailed",
+    "name": "AI 에이전트 테스트 - 상세 함수 분석", 
+    "description": "AI 에이전트가 여러 파일을 검색하고 분석하는 능력 테스트",
+    "type": "single",
+    "priority": 2,
+    "prompt": "@test_agent/main.py\n\n위 main.py 파일을 분석하고 다음을 포함하는 포괄적인 문서를 작성해주세요:\n\n1. **애플리케이션 개요**: 이 애플리케이션의 목적은 무엇인가요?\n\n2. **완전한 함수 목록**: main.py에서 사용되는 모든 함수를 나열하세요:\n   - main.py에 정의된 함수\n   - 다른 모듈에서 import된 함수\n   - 각 함수에 대해 기능과 매개변수를 설명하세요\n\n3. **설정 분석**: 사용되는 모든 설정 변수와 그 목적을 나열하세요\n\n4. **모듈 의존성**: 모든 모듈과 그들의 관계를 매핑하세요\n\n5. **데이터 흐름**: 입력에서 출력까지 완전한 데이터 흐름을 설명하세요\n\n중요: 이 분석을 완료하려면:\n- test_agent 디렉토리에서 Python 파일들을 검색하세요\n- import된 모듈들(utils.data_processor, utils.file_handler, config)을 읽으세요\n- 완전한 구현을 이해하세요\n\n포괄적인 분석 보고서를 작성하고 주요 결과를 CSV 파일로 저장하세요:\n\n<create_csv filename=\"functions_inventory.csv\">\n모듈,함수명,매개변수,반환타입,설명\n</create_csv>\n\n<create_csv filename=\"configuration.csv\">\n변수명,값,목적,사용위치\n</create_csv>\n\n**중요: 모든 응답과 CSV 내용은 한국어로 작성해주세요.**"
+  },
+  {
+    "id": "agent_test_search",
+    "name": "AI 에이전트 테스트 - 파일 검색 및 분석",
+    "description": "AI 에이전트의 파일 검색 능력 테스트",
+    "type": "single", 
+    "priority": 3,
+    "prompt": "test_agent 디렉토리에 Python 프로젝트가 있지만 구조를 모릅니다.\n\n다음을 수행해주세요:\n1. test_agent 디렉토리에서 모든 Python 파일을 검색하세요\n2. 각 파일을 읽고 목적을 이해하세요\n3. 프로젝트 구조 다이어그램을 작성하세요\n4. 진입점(entry point)을 식별하세요\n5. 모든 의존성과 import를 나열하세요\n6. 모듈들이 서로 어떻게 상호작용하는지 설명하세요\n\n포괄적인 프로젝트 문서를 생성하고 다음과 같이 저장하세요:\n\n<create_csv filename=\"project_structure.csv\">\n파일경로,타입,코드줄수,주요목적,핵심함수\n</create_csv>\n\n<create_csv filename=\"import_dependencies.csv\">\n파일,임포트출처,임포트항목\n</create_csv>\n\n**중요: 모든 응답과 CSV 내용은 한국어로 작성해주세요.**"
+  }
+]
