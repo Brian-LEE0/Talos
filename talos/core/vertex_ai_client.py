@@ -341,18 +341,35 @@ Available tools:
 2. **search_files**: Search for files matching a pattern
 <search_files pattern="*.py" directory="."></search_files>
 
-3. **create_file**: Create a new file with content
-<create_file path="path/to/newfile.txt">
+3. **create_file**: Create a new file with content (in workspace/outputs/ directory)
+<create_file path="analysis_results.txt">
 File content goes here...
+Multiple lines are supported.
 </create_file>
 
-4. **update_file**: Update specific lines in an existing file
-<update_file path="path/to/file.py" start_line="10" end_line="15">
+Important notes for create_file:
+- Files are ALWAYS created in workspace/outputs/ directory
+- Just specify the filename or subdirectory structure
+- Example: "report.txt" creates workspace/outputs/report.txt
+- Example: "data/results.csv" creates workspace/outputs/data/results.csv
+- Parent directories are created automatically
+
+4. **update_file**: Update specific lines in an existing file (in workspace/outputs/ directory)
+<update_file path="analysis_results.txt" start_line="10" end_line="15">
 New content for lines 10-15...
 </update_file>
 
-5. **delete_file**: Delete a file
-<delete_file path="path/to/file.txt"></delete_file>
+Important notes for update_file:
+- Only files in workspace/outputs/ can be updated
+- Line numbers are 1-indexed
+- Specify the same path you used in create_file
+
+5. **delete_file**: Delete a file (from workspace/outputs/ directory)
+<delete_file path="temporary_file.txt"></delete_file>
+
+Important notes for delete_file:
+- Only files in workspace/outputs/ can be deleted
+- Use the same path you used in create_file
 
 6. **create_task**: Create a new sub-task for complex workflows
 <create_task name="Task Name" description="Task description" type="single" priority="0">
@@ -666,27 +683,60 @@ Please continue your analysis with this new information. If you need more inform
             return f"ERROR: {error_msg}"
     
     def _execute_create_file(self, file_path: str, content: str, workspace_dir: Optional[str]) -> str:
-        """Execute create_file tool."""
+        """Execute create_file tool - creates files in workspace/outputs/ directory."""
         try:
-            # Resolve path
-            if not os.path.isabs(file_path):
-                if workspace_dir:
-                    file_path = os.path.join(workspace_dir, file_path)
-                else:
-                    file_path = os.path.abspath(file_path)
+            # Determine the outputs directory
+            if workspace_dir:
+                outputs_dir = os.path.join(workspace_dir, "outputs")
+            else:
+                outputs_dir = os.path.join(os.getcwd(), "outputs")
             
-            # Create file
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            self.file_manager.create_file(file_path, content, overwrite=True)
+            # Ensure outputs directory exists
+            os.makedirs(outputs_dir, exist_ok=True)
             
-            logger.info(f"✅ Created file: {file_path}")
+            # Remove any leading path separators or "../" to prevent directory traversal
+            file_path = file_path.lstrip('/\\').replace('..', '')
             
-            # Update context manager to include new file
-            from .context_manager import get_context_manager
-            context_manager = get_context_manager()
-            context_manager.add_file_to_context(file_path, force_reload=True)
+            # Construct full path (always inside outputs directory)
+            full_path = os.path.join(outputs_dir, file_path)
+            full_path = os.path.normpath(full_path)
             
-            return f"SUCCESS: File created at {file_path}\nSize: {len(content)} bytes"
+            # Security check: ensure the final path is still inside outputs directory
+            if not full_path.startswith(outputs_dir):
+                error_msg = f"Security error: File path '{file_path}' attempts to escape outputs directory"
+                logger.error(error_msg)
+                return f"ERROR: {error_msg}"
+            
+            # Create parent directories within outputs
+            parent_dir = os.path.dirname(full_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            
+            # Write file
+            try:
+                with open(full_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                
+                # Get relative path for display
+                rel_path = os.path.relpath(full_path, workspace_dir if workspace_dir else os.getcwd())
+                
+                logger.info(f"✅ Created file: {rel_path} ({len(content)} bytes)")
+                
+                # Update context manager to include new file
+                from .context_manager import get_context_manager
+                context_manager = get_context_manager()
+                context_manager.add_file_to_context(full_path, force_reload=True)
+                
+                return f"SUCCESS: File created in outputs directory\nPath: {rel_path}\nSize: {len(content)} bytes"
+                
+            except PermissionError as pe:
+                error_msg = f"Permission denied writing to '{file_path}': {str(pe)}"
+                logger.error(error_msg)
+                return f"ERROR: {error_msg}"
+            except Exception as we:
+                error_msg = f"Failed to write file '{file_path}': {str(we)}"
+                logger.error(error_msg, exc_info=True)
+                return f"ERROR: {error_msg}"
             
         except Exception as e:
             error_msg = f"Failed to create file '{file_path}': {str(e)}"
@@ -694,31 +744,33 @@ Please continue your analysis with this new information. If you need more inform
             return f"ERROR: {error_msg}"
     
     def _execute_update_file(self, file_path: str, start_line: int, end_line: int, new_content: str, workspace_dir: Optional[str]) -> str:
-        """Execute update_file tool - updates specific lines in a file."""
+        """Execute update_file tool - updates files in workspace/outputs/ directory."""
         try:
-            # Resolve path (use same strategies as read_file)
-            possible_paths = []
+            # Determine the outputs directory
             if workspace_dir:
-                possible_paths.append(os.path.join(workspace_dir, file_path))
-            if os.path.isabs(file_path):
-                possible_paths.append(file_path)
-            possible_paths.append(os.path.abspath(file_path))
-            if workspace_dir and 'workspaces' in workspace_dir:
-                workspace_parent = Path(workspace_dir)
-                while workspace_parent.name != 'workspaces' and workspace_parent.parent != workspace_parent:
-                    workspace_parent = workspace_parent.parent
-                if workspace_parent.name == 'workspaces':
-                    project_root = workspace_parent.parent
-                    possible_paths.append(os.path.join(str(project_root), file_path))
+                outputs_dir = os.path.join(workspace_dir, "outputs")
+            else:
+                outputs_dir = os.path.join(os.getcwd(), "outputs")
+            
+            # Remove any leading path separators or "../"
+            file_path = file_path.lstrip('/\\').replace('..', '')
+            
+            # Try to find file in outputs directory
+            possible_paths = [
+                os.path.join(outputs_dir, file_path),  # Direct path in outputs
+                os.path.normpath(os.path.join(outputs_dir, file_path))  # Normalized path
+            ]
             
             resolved_path = None
             for p in possible_paths:
-                if os.path.exists(p):
+                if os.path.exists(p) and p.startswith(outputs_dir):
                     resolved_path = p
                     break
             
             if not resolved_path:
-                return f"ERROR: File not found: {file_path}"
+                error_msg = f"File not found in outputs directory: {file_path}"
+                logger.warning(error_msg)
+                return f"ERROR: {error_msg}\nNote: Files must be in workspace/outputs/ directory"
             
             # Read existing content
             with open(resolved_path, 'r', encoding='utf-8') as f:
@@ -736,14 +788,17 @@ Please continue your analysis with this new information. If you need more inform
             with open(resolved_path, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
             
-            logger.info(f"✅ Updated file: {resolved_path}, lines {start_line}-{end_line}")
+            # Get relative path
+            rel_path = os.path.relpath(resolved_path, workspace_dir if workspace_dir else os.getcwd())
+            
+            logger.info(f"✅ Updated file: {rel_path}, lines {start_line}-{end_line}")
             
             # Update context manager
             from .context_manager import get_context_manager
             context_manager = get_context_manager()
             context_manager.add_file_to_context(resolved_path, force_reload=True)
             
-            return f"SUCCESS: Updated {resolved_path} lines {start_line}-{end_line}\nNew content ({len(new_lines)} lines):\n{new_content[:200]}..."
+            return f"SUCCESS: Updated file in outputs directory\nPath: {rel_path}\nLines: {start_line}-{end_line} ({len(new_lines)} new lines)"
             
         except Exception as e:
             error_msg = f"Failed to update file '{file_path}': {str(e)}"
@@ -751,29 +806,41 @@ Please continue your analysis with this new information. If you need more inform
             return f"ERROR: {error_msg}"
     
     def _execute_delete_file(self, file_path: str, workspace_dir: Optional[str]) -> str:
-        """Execute delete_file tool."""
+        """Execute delete_file tool - deletes files from workspace/outputs/ directory."""
         try:
-            # Resolve path
-            possible_paths = []
+            # Determine the outputs directory
             if workspace_dir:
-                possible_paths.append(os.path.join(workspace_dir, file_path))
-            if os.path.isabs(file_path):
-                possible_paths.append(file_path)
-            possible_paths.append(os.path.abspath(file_path))
+                outputs_dir = os.path.join(workspace_dir, "outputs")
+            else:
+                outputs_dir = os.path.join(os.getcwd(), "outputs")
+            
+            # Remove any leading path separators or "../"
+            file_path = file_path.lstrip('/\\').replace('..', '')
+            
+            # Try to find file in outputs directory
+            possible_paths = [
+                os.path.join(outputs_dir, file_path),
+                os.path.normpath(os.path.join(outputs_dir, file_path))
+            ]
             
             resolved_path = None
             for p in possible_paths:
-                if os.path.exists(p):
+                if os.path.exists(p) and p.startswith(outputs_dir):
                     resolved_path = p
                     break
             
             if not resolved_path:
-                return f"ERROR: File not found: {file_path}"
+                error_msg = f"File not found in outputs directory: {file_path}"
+                logger.warning(error_msg)
+                return f"ERROR: {error_msg}\nNote: Can only delete files in workspace/outputs/ directory"
+            
+            # Get relative path before deletion
+            rel_path = os.path.relpath(resolved_path, workspace_dir if workspace_dir else os.getcwd())
             
             # Delete file
             os.remove(resolved_path)
             
-            logger.info(f"✅ Deleted file: {resolved_path}")
+            logger.info(f"✅ Deleted file: {rel_path}")
             
             # Remove from context manager
             from .context_manager import get_context_manager
@@ -781,7 +848,7 @@ Please continue your analysis with this new information. If you need more inform
             if resolved_path in context_manager.context_files:
                 del context_manager.context_files[resolved_path]
             
-            return f"SUCCESS: Deleted file {resolved_path}"
+            return f"SUCCESS: Deleted file from outputs directory\nPath: {rel_path}"
             
         except Exception as e:
             error_msg = f"Failed to delete file '{file_path}': {str(e)}"
