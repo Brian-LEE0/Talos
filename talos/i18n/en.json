@@ -30,7 +30,13 @@
       "files_loaded": "Files Loaded",
       "total_tokens": "Total Tokens",
       "recent_activity": "Recent Activity",
-      "no_activity": "No recent activity"
+      "no_activity": "No recent activity",
+      "config_title": "Vertex AI Configuration",
+      "credentials_management": "Credentials Management",
+      "upload_credentials": "Upload New Credentials",
+      "default_settings": "Default Settings",
+      "credentials_updated": "Credentials updated successfully!",
+      "settings_updated": "Default settings updated successfully!"
     },
     "tasks": {
       "title": "Task Management",

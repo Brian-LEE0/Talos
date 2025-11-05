@@ -30,7 +30,13 @@
       "files_loaded": "読み込みファイル",
       "total_tokens": "総トークン",
       "recent_activity": "最近の活動",
-      "no_activity": "最近の活動なし"
+      "no_activity": "最近の活動なし",
+      "config_title": "Vertex AI 設定",
+      "credentials_management": "認証情報管理",
+      "upload_credentials": "新しい認証情報をアップロード",
+      "default_settings": "デフォルト設定",
+      "credentials_updated": "認証情報が正常に更新されました！",
+      "settings_updated": "デフォルト設定が正常に更新されました！"
     },
     "tasks": {
       "title": "タスク管理",

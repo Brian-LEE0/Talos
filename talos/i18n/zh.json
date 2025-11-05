@@ -30,7 +30,13 @@
       "files_loaded": "已加载文件",
       "total_tokens": "总令牌数",
       "recent_activity": "最近活动",
-      "no_activity": "无最近活动"
+      "no_activity": "无最近活动",
+      "config_title": "Vertex AI 配置",
+      "credentials_management": "凭据管理",
+      "upload_credentials": "上传新凭据",
+      "default_settings": "默认设置",
+      "credentials_updated": "凭据更新成功！",
+      "settings_updated": "默认设置更新成功！"
     },
     "tasks": {
       "title": "任务管理",

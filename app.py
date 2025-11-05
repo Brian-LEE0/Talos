@@ -15,7 +15,7 @@ from pathlib import Path
 import json
 import time
 import nest_asyncio
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
 
 nest_asyncio.apply()
@@ -41,14 +41,13 @@ st.set_page_config(
 
 class SystemManagers(BaseModel):
     """System managers container using Pydantic BaseModel"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     task_manager: object
     context_manager: object
     file_manager: object
     parallel_executor: object
     vertex_client: object
-    
-    class Config:
-        arbitrary_types_allowed = True
 
 # Initialize managers
 @st.cache_resource
@@ -168,6 +167,95 @@ def highlight_mentions(text: str) -> str:
 def show_dashboard(managers: SystemManagers):
     """Dashboard tab"""
     st.header(t('ui.dashboard.title'))
+    
+    # Credentials & Settings Section
+    with st.expander("⚙️ Vertex AI Configuration", expanded=False):
+        st.markdown("### 🔑 Credentials Management")
+        
+        # Show current credentials info
+        creds_info = managers.vertex_client.get_credentials_info()
+        
+        col_info1, col_info2 = st.columns(2)
+        with col_info1:
+            st.info(f"**Project ID:** {creds_info.get('project_id', 'Not set')}")
+            st.info(f"**Credentials File:** `{creds_info.get('credentials_path', 'N/A')}`")
+        with col_info2:
+            status = "✅ Found" if creds_info.get('credentials_exists') else "❌ Not Found"
+            st.info(f"**Status:** {status}")
+        
+        st.markdown("---")
+        
+        # Upload new credentials
+        st.markdown("### 📤 Upload New Credentials")
+        uploaded_creds = st.file_uploader(
+            "Upload service account JSON file",
+            type=['json'],
+            help="Upload your Google Cloud service account credentials JSON file",
+            key="creds_uploader"
+        )
+        
+        if uploaded_creds is not None:
+            try:
+                creds_content = uploaded_creds.read().decode('utf-8')
+                
+                # Show preview
+                creds_data = json.loads(creds_content)
+                st.success(f"✅ Valid credentials for project: **{creds_data.get('project_id', 'Unknown')}**")
+                
+                # Save button
+                if st.button("💾 Save and Apply Credentials", type="primary"):
+                    if managers.vertex_client.update_credentials(creds_content):
+                        st.success("🎉 Credentials updated successfully! Reinitializing client...")
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to update credentials. Check logs for details.")
+                        
+            except json.JSONDecodeError:
+                st.error("❌ Invalid JSON file. Please upload a valid service account credentials file.")
+            except Exception as e:
+                st.error(f"❌ Error reading file: {e}")
+        
+        st.markdown("---")
+        
+        # Default settings
+        st.markdown("### 🎛️ Default Settings")
+        
+        settings_col1, settings_col2 = st.columns(2)
+        
+        with settings_col1:
+            available_locations = managers.vertex_client.list_available_locations()
+            current_location = creds_info.get('location', 'us-central1')
+            
+            new_location = st.selectbox(
+                "Default Region",
+                options=available_locations,
+                index=available_locations.index(current_location) if current_location in available_locations else 0,
+                help="Default Google Cloud region for API calls",
+                key="default_location"
+            )
+        
+        with settings_col2:
+            available_models = managers.vertex_client.list_available_models()
+            current_model = creds_info.get('model_name', 'gemini-2.5-flash-lite')
+            
+            new_model = st.selectbox(
+                "Default Model",
+                options=available_models,
+                index=available_models.index(current_model) if current_model in available_models else 1,
+                help="Default Vertex AI model for new tasks",
+                key="default_model"
+            )
+        
+        if st.button("💾 Update Default Settings"):
+            if managers.vertex_client.update_default_settings(location=new_location, model_name=new_model):
+                st.success("✅ Default settings updated successfully!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("❌ Failed to update settings. Check logs for details.")
+    
+    st.markdown("---")
     
     col1, col2 = st.columns(2)
     
@@ -433,18 +521,20 @@ def show_tasks(managers: SystemManagers):
                     
                     action_col1, action_col2, action_col3, action_col4 = st.columns(4)
                     
+                    # Check if task is editable (only PENDING or FAILED)
+                    is_editable = task.status in [TaskStatus.PENDING, TaskStatus.FAILED]
+                    
                     with action_col1:
                         if st.button("▶️ Run", key=f"run_{task.task_id}", use_container_width=True):
-                            if managers.task_manager.execute_task(task.task_id):
-                                st.success(t('ui.tasks.run_success'))
-                                st.rerun()
-                            else:
-                                st.error(t('ui.tasks.run_failed'))
+                            # Show execution container
+                            st.session_state[f'running_{task.task_id}'] = True
+                            st.rerun()
                     
                     with action_col2:
-                        if st.button("✏️ Edit", key=f"edit_{task.task_id}", use_container_width=True):
-                            st.session_state[f'editing_{task.task_id}'] = True
-                            st.rerun()
+                        if st.button("✏️ Edit", key=f"edit_{task.task_id}", use_container_width=True, disabled=not is_editable):
+                            if is_editable:
+                                st.session_state[f'editing_{task.task_id}'] = True
+                                st.rerun()
                     
                     with action_col3:
                         if st.button("⏹️ Cancel", key=f"cancel_{task.task_id}", use_container_width=True):
@@ -457,6 +547,115 @@ def show_tasks(managers: SystemManagers):
                             if managers.task_manager.delete_task(task.task_id, delete_workspace=True):
                                 st.success(t('ui.tasks.delete_success'))
                                 st.rerun()
+                
+                # Real-time execution streaming
+                if st.session_state.get(f'running_{task.task_id}', False):
+                    st.markdown("---")
+                    
+                    with st.status("🔄 Executing task...", expanded=True) as status:
+                        st.write("� Task execution started...")
+                        
+                        # Create placeholders
+                        progress_text = st.empty()
+                        output_container = st.container()
+                        
+                        # Execute task in background
+                        import threading
+                        import queue
+                        
+                        output_queue = queue.Queue()
+                        result_container = {'result': None, 'done': False}
+                        
+                        def execute_and_monitor():
+                            """Execute task and monitor logs"""
+                            try:
+                                # Start execution
+                                result = managers.task_manager.execute_task(task.task_id)
+                                result_container['result'] = result
+                                result_container['done'] = True
+                            except Exception as e:
+                                logger.error(f"Execution error: {e}", exc_info=True)
+                                result_container['result'] = False
+                                result_container['done'] = True
+                        
+                        # Start execution thread
+                        exec_thread = threading.Thread(target=execute_and_monitor, daemon=True)
+                        exec_thread.start()
+                        
+                        # Monitor log file
+                        if task.output_dir:
+                            log_file = os.path.join(task.output_dir, "task.log")
+                            last_position = 0
+                            iteration_count = 0
+                            all_outputs = []
+                            
+                            import time
+                            while not result_container['done']:
+                                if os.path.exists(log_file):
+                                    try:
+                                        with open(log_file, 'r', encoding='utf-8') as f:
+                                            f.seek(last_position)
+                                            new_content = f.read()
+                                            last_position = f.tell()
+                                            
+                                            if new_content:
+                                                # Extract iteration info
+                                                if "AGENT ITERATION" in new_content:
+                                                    import re
+                                                    iter_match = re.search(r'AGENT ITERATION (\d+)/(\d+)', new_content)
+                                                    if iter_match:
+                                                        iteration_count = int(iter_match.group(1))
+                                                        max_iter = int(iter_match.group(2))
+                                                        progress_text.info(f"🔄 Iteration {iteration_count}/{max_iter}")
+                                                
+                                                # Extract LLM output
+                                                if "LLM OUTPUT - START" in new_content:
+                                                    lines = new_content.split('\n')
+                                                    output_lines = []
+                                                    capturing = False
+                                                    
+                                                    for line in lines:
+                                                        if "LLM OUTPUT - START" in line:
+                                                            capturing = True
+                                                            continue
+                                                        elif "LLM OUTPUT - END" in line:
+                                                            capturing = False
+                                                            if output_lines:
+                                                                all_outputs.append('\n'.join(output_lines))
+                                                            output_lines = []
+                                                            continue
+                                                        elif capturing:
+                                                            if not line.startswith('=') and line.strip():
+                                                                if not line.startswith('Response:'):
+                                                                    output_lines.append(line)
+                                                    
+                                                    # Display latest outputs
+                                                    if all_outputs:
+                                                        with output_container:
+                                                            for idx, output in enumerate(all_outputs[-3:], 1):  # Show last 3 outputs
+                                                                with st.expander(f"💬 Response {len(all_outputs) - 3 + idx}", expanded=(idx == len(all_outputs[-3:]))):
+                                                                    st.code(output, language=None)
+                                    except Exception as e:
+                                        logger.debug(f"Log reading error: {e}")
+                                
+                                time.sleep(0.3)  # Check every 300ms
+                            
+                            # Wait for thread to finish
+                            exec_thread.join(timeout=5)
+                        
+                        # Update status
+                        st.session_state[f'running_{task.task_id}'] = False
+                        
+                        if result_container['result']:
+                            status.update(label="✅ Task completed!", state="complete", expanded=False)
+                            st.success("Task execution finished successfully!")
+                        else:
+                            status.update(label="❌ Task failed!", state="error", expanded=True)
+                            st.error("Task execution encountered an error. Check the logs for details.")
+                        
+                        # Auto-refresh after delay
+                        time.sleep(3)
+                        st.rerun()
                 
                 # Edit form (if editing)
                 if st.session_state.get(f'editing_{task.task_id}', False):

@@ -75,37 +75,46 @@ class ContextManager:
         Parse file/directory mentions from text.
 
         Supported formats:
-        - @filename.ext
-        - @directory/
+        - @filename.ext (file)
+        - @directory/ (directory with trailing slash)
+        - @path/to/file (file path)
+        - @path/to/directory/ (directory path with trailing slash)
         """
         mentions = []
         lines = text.split('\n')
         
-        # Define mention patterns
-        patterns = [
-            (r'@([^\s/]+\.[^\s/]+)', 'file'),  # @filename.ext
-            (r'@(\./[^\s]+)', 'file'),  # @./path/to/file
-            (r'@([^\s/]+/)', 'directory'),  # @directory_name/
-            (r'@(\./[^\s]*/)', 'directory'),  # @./path/to/directory/
-        ]
-        
         for line_num, line in enumerate(lines, 1):
-            for pattern, mention_type in patterns:
-                matches = re.finditer(pattern, line)
-                for match in matches:
-                    path = match.group(1)
-                    mentions.append(MentionedFile(
-                        path=path,
-                        mention_type=mention_type,
-                        context=line.strip(),
-                        line_number=line_num
-                    ))
+            # Find all @mentions in the line
+            pattern = r'@([\w\-\.\/\\]+\/?)'
+            matches = re.finditer(pattern, line)
+            
+            for match in matches:
+                path = match.group(1)
+                
+                # Determine if it's a directory or file
+                if path.endswith('/'):
+                    mention_type = 'directory'
+                    path = path.rstrip('/')  # Remove trailing slash for processing
+                elif '.' in os.path.basename(path):
+                    # Has file extension, likely a file
+                    mention_type = 'file'
+                else:
+                    # No extension and no trailing slash - could be either
+                    # Default to directory if it exists as a directory
+                    mention_type = 'directory'
+                
+                mentions.append(MentionedFile(
+                    path=path,
+                    mention_type=mention_type,
+                    context=line.strip(),
+                    line_number=line_num
+                ))
         
         return mentions
     
     def resolve_mention_path(self, mention_path: str, base_dir: str = ".", project_root: Optional[str] = None) -> Optional[str]:
         """
-        Resolve a mention path to an actual file path.
+        Resolve a mention path to an actual file or directory path.
         
         Tries multiple strategies:
         1. Absolute path
@@ -115,7 +124,9 @@ class ContextManager:
         try:
             # Absolute path
             if os.path.isabs(mention_path):
-                return mention_path if os.path.exists(mention_path) else None
+                if os.path.exists(mention_path):
+                    return mention_path
+                return None
             
             # Strategy 1: Relative to base_dir (workspace)
             if mention_path.startswith('./'):
@@ -200,9 +211,84 @@ class ContextManager:
             print(f"Failed to add file to context ({file_path}): {e}")
             return False
     
-    def add_directory_to_context(self, dir_path: str, pattern: str = "*", recursive: bool = False) -> int:
+    def generate_directory_structure(self, dir_path: str, max_depth: int = 3, current_depth: int = 0) -> str:
         """
-        Add files from a directory to the context.
+        Generate a text representation of directory structure.
+        
+        Args:
+            dir_path: Directory path
+            max_depth: Maximum recursion depth
+            current_depth: Current depth (for recursion)
+            
+        Returns:
+            Directory structure as string
+        """
+        try:
+            if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
+                return ""
+            
+            indent = "  " * current_depth
+            structure = []
+            
+            # Add directory name
+            if current_depth == 0:
+                structure.append(f"📁 {os.path.basename(dir_path)}/")
+            
+            # List all items
+            try:
+                items = sorted(os.listdir(dir_path))
+            except PermissionError:
+                return f"{indent}[Permission Denied]"
+            
+            # Separate files and directories
+            files = []
+            dirs = []
+            
+            for item in items:
+                item_path = os.path.join(dir_path, item)
+                # Skip hidden files and common ignore patterns
+                if item.startswith('.') or item in ['__pycache__', 'node_modules', '.git', '.venv', 'venv']:
+                    continue
+                
+                if os.path.isdir(item_path):
+                    dirs.append(item)
+                else:
+                    files.append(item)
+            
+            # Add directories first
+            for dir_name in dirs:
+                structure.append(f"{indent}├── 📁 {dir_name}/")
+                if current_depth < max_depth - 1:
+                    sub_dir_path = os.path.join(dir_path, dir_name)
+                    sub_structure = self.generate_directory_structure(sub_dir_path, max_depth, current_depth + 1)
+                    if sub_structure:
+                        # Add sub-items with extra indent
+                        for line in sub_structure.split('\n'):
+                            if line.strip():
+                                structure.append(f"{indent}│   {line}")
+            
+            # Add files
+            for file_name in files:
+                file_path = os.path.join(dir_path, file_name)
+                file_size = os.path.getsize(file_path)
+                # Format file size
+                if file_size < 1024:
+                    size_str = f"{file_size}B"
+                elif file_size < 1024 * 1024:
+                    size_str = f"{file_size/1024:.1f}KB"
+                else:
+                    size_str = f"{file_size/(1024*1024):.1f}MB"
+                
+                structure.append(f"{indent}├── 📄 {file_name} ({size_str})")
+            
+            return "\n".join(structure)
+            
+        except Exception as e:
+            return f"Error generating directory structure: {e}"
+    
+    def add_directory_to_context(self, dir_path: str, pattern: str = "*", recursive: bool = True) -> int:
+        """
+        Add directory structure and files to the context.
         
         Args:
             dir_path: Directory path.
@@ -216,14 +302,41 @@ class ContextManager:
             if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
                 return 0
             
-            files = self.file_manager.search_files(dir_path, pattern, recursive)
-            added_count = 0
+            abs_dir_path = os.path.abspath(dir_path)
             
-            for file_path in files:
+            # Generate directory structure
+            dir_structure = self.generate_directory_structure(abs_dir_path, max_depth=3)
+            
+            # Create a special "directory info" file context
+            dir_info_path = f"{abs_dir_path}/_directory_structure.txt"
+            dir_context = FileContext(
+                path=dir_info_path,
+                content=f"""Directory Structure: {abs_dir_path}
+
+{dir_structure}
+
+Total items: {len(os.listdir(abs_dir_path))} items
+""",
+                hash_md5="",
+                size=len(dir_structure),
+                added_time=time.time(),
+                last_accessed=time.time(),
+                is_summary=False,
+                original_size=len(dir_structure)
+            )
+            
+            # Add directory structure to context
+            self.context_files[dir_info_path] = dir_context
+            
+            # Also add actual files from the directory
+            files = self.file_manager.search_files(abs_dir_path, pattern, recursive)
+            added_count = 1  # Count the directory structure file
+            
+            for file_path in files[:20]:  # Limit to first 20 files to avoid overwhelming context
                 if self.add_file_to_context(file_path):
                     added_count += 1
             
-            print(f"Added {added_count} files from directory to context: {dir_path}")
+            print(f"Added directory structure and {added_count-1} files from: {dir_path}")
             return added_count
             
         except Exception as e:
@@ -250,18 +363,24 @@ class ContextManager:
             real_path = self.resolve_mention_path(mention.path, base_dir, project_root)
             
             if real_path:
-                if mention.mention_type == 'file':
-                    if self.add_file_to_context(real_path):
-                        successful.append(real_path)
+                # Check if resolved path is actually a directory or file
+                if os.path.isdir(real_path):
+                    # It's a directory
+                    count = self.add_directory_to_context(real_path)
+                    if count > 0:
+                        successful.append(f"{real_path} (📁 {count} items)")
                     else:
                         failed.append(mention.path)
                         
-                elif mention.mention_type == 'directory':
-                    count = self.add_directory_to_context(real_path)
-                    if count > 0:
-                        successful.append(f"{real_path} ({count} files)")
+                elif os.path.isfile(real_path):
+                    # It's a file
+                    if self.add_file_to_context(real_path):
+                        successful.append(f"{real_path} (📄 file)")
                     else:
                         failed.append(mention.path)
+                else:
+                    # Path exists but is neither file nor directory
+                    failed.append(mention.path)
             else:
                 failed.append(mention.path)
         

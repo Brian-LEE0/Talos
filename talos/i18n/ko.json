@@ -30,7 +30,13 @@
       "files_loaded": "로드된 파일",
       "total_tokens": "총 토큰",
       "recent_activity": "최근 활동",
-      "no_activity": "최근 활동 없음"
+      "no_activity": "최근 활동 없음",
+      "config_title": "Vertex AI 설정",
+      "credentials_management": "인증 정보 관리",
+      "upload_credentials": "새 인증 정보 업로드",
+      "default_settings": "기본 설정",
+      "credentials_updated": "인증 정보가 성공적으로 업데이트되었습니다!",
+      "settings_updated": "기본 설정이 성공적으로 업데이트되었습니다!"
     },
     "tasks": {
       "title": "태스크 관리",

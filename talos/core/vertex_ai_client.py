@@ -40,8 +40,93 @@ class VertexAIClient:
         self._client = None
         self._model = None
         self.file_manager = get_file_manager()
+        self.credentials = None
         
         self._initialize()
+    
+    def update_credentials(self, credentials_content: str, save_path: Optional[str] = None) -> bool:
+        """
+        Update Vertex AI credentials from JSON content
+        
+        Args:
+            credentials_content: JSON string of service account credentials
+            save_path: Optional path to save credentials file (defaults to current credentials_path)
+            
+        Returns:
+            bool: True if update successful, False otherwise
+        """
+        try:
+            # Validate JSON
+            creds_data = json.loads(credentials_content)
+            
+            # Validate required fields
+            if 'project_id' not in creds_data:
+                raise ValueError("project_id not found in credentials")
+            if 'type' not in creds_data or creds_data['type'] != 'service_account':
+                raise ValueError("Invalid credential type. Must be service_account")
+            
+            # Save to file
+            target_path = Path(save_path) if save_path else self.credentials_path
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(target_path, 'w', encoding='utf-8') as f:
+                json.dump(creds_data, f, indent=2)
+            
+            # Update internal path and reinitialize
+            self.credentials_path = target_path
+            self._initialize()
+            
+            logger.info(f"Credentials updated successfully: {target_path}")
+            return True
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON format: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to update credentials: {e}")
+            return False
+    
+    def get_credentials_info(self) -> Dict[str, Any]:
+        """
+        Get current credentials information
+        
+        Returns:
+            dict: Credentials info (project_id, location, model_name, credentials_path)
+        """
+        return {
+            'project_id': self.project_id,
+            'location': self.location,
+            'model_name': self.model_name,
+            'credentials_path': str(self.credentials_path),
+            'credentials_exists': self.credentials_path.exists()
+        }
+    
+    def update_default_settings(self, location: Optional[str] = None, model_name: Optional[str] = None) -> bool:
+        """
+        Update default location and model settings
+        
+        Args:
+            location: New default location
+            model_name: New default model name
+            
+        Returns:
+            bool: True if update successful
+        """
+        try:
+            if location:
+                self.location = location
+            if model_name:
+                self.model_name = model_name
+            
+            # Reinitialize with new settings
+            self._initialize()
+            
+            logger.info(f"Default settings updated: location={self.location}, model={self.model_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to update default settings: {e}")
+            return False
     
     def _initialize(self):
         """Initialize the client"""
@@ -57,8 +142,8 @@ class VertexAIClient:
             if not self.project_id:
                 raise ValueError("project_id not found in credentials file")
             
-            # Create service account credentials
-            credentials = service_account.Credentials.from_service_account_file(
+            # Create service account credentials and store it
+            self.credentials = service_account.Credentials.from_service_account_file(
                 self.credentials_path,
                 scopes=['https://www.googleapis.com/auth/cloud-platform']
             )
@@ -67,7 +152,7 @@ class VertexAIClient:
             vertexai.init(
                 project=self.project_id,
                 location=self.location,
-                credentials=credentials
+                credentials=self.credentials
             )
             
             # Initialize generative model
@@ -85,7 +170,9 @@ class VertexAIClient:
         temperature: float = 0.1,
         max_tokens: int = 32000,
         top_p: float = 1.0,
-        system_instruction: Optional[str] = None
+        system_instruction: Optional[str] = None,
+        model_name: Optional[str] = None,
+        location: Optional[str] = None
     ) -> str:
         """
         Generate text using AI model
@@ -96,15 +183,30 @@ class VertexAIClient:
             max_tokens: Maximum token count
             top_p: Diversity control
             system_instruction: System instruction
+            model_name: Model to use (defaults to self.model_name)
+            location: Region to use (defaults to self.location)
             
         Returns:
             Generated text
         """
         try:
+            # Use provided model_name and location or fall back to defaults
+            use_model_name = model_name or self.model_name
+            use_location = location or self.location
+            
+            # Reinitialize if location changed
+            if use_location != self.location:
+                vertexai.init(
+                    project=self.project_id,
+                    location=use_location,
+                    credentials=self.credentials
+                )
+            
             # Log input
             logger.info("="*80)
             logger.info("LLM INPUT - START")
             logger.info("="*80)
+            logger.info(f"Model: {use_model_name}, Location: {use_location}")
             if system_instruction:
                 logger.info(f"System Instruction:\n{system_instruction}")
                 logger.info("-"*80)
@@ -122,11 +224,15 @@ class VertexAIClient:
             # Recreate model with system instruction if provided
             if system_instruction:
                 model = GenerativeModel(
-                    self.model_name,
+                    use_model_name,
                     system_instruction=system_instruction
                 )
             else:
-                model = self._model
+                # Use specified model or default
+                if use_model_name != self.model_name:
+                    model = GenerativeModel(use_model_name)
+                else:
+                    model = self._model
             
             # Generate text
             response = model.generate_content(
