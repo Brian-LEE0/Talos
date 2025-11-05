@@ -1,6 +1,7 @@
 """
 Talos Web Application
 Streamlit-based web interface for AI-powered task management system
+Version: 0.1.0
 """
 
 import streamlit as st
@@ -14,6 +15,8 @@ from pathlib import Path
 import json
 import time
 import nest_asyncio
+from pydantic import BaseModel
+from typing import Optional
 
 nest_asyncio.apply()
 
@@ -36,16 +39,28 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+class SystemManagers(BaseModel):
+    """System managers container using Pydantic BaseModel"""
+    task_manager: object
+    context_manager: object
+    file_manager: object
+    parallel_executor: object
+    vertex_client: object
+    
+    class Config:
+        arbitrary_types_allowed = True
+
 # Initialize managers
 @st.cache_resource
-def initialize_managers():
+def initialize_managers() -> SystemManagers:
     """Initialize all system managers"""
-    return {
-        'task_manager': get_task_manager(),
-        'context_manager': get_context_manager(),
-        'file_manager': get_file_manager(),
-        'parallel_executor': get_parallel_executor()
-    }
+    return SystemManagers(
+        task_manager=get_task_manager(),
+        context_manager=get_context_manager(),
+        file_manager=get_file_manager(),
+        parallel_executor=get_parallel_executor(),
+        vertex_client=get_vertex_client()
+    )
 
 def initialize_i18n():
     """Initialize internationalization"""
@@ -58,11 +73,12 @@ def language_selector():
     languages = {
         'en': '🇺🇸 English',
         'ko': '🇰🇷 한국어', 
-        'ja': '🇯🇵 日本語'
+        'ja': '🇯🇵 日本語',
+        'zh': '🇨🇳 中文'
     }
     
     selected = st.sidebar.selectbox(
-        "Language / 언어 / 言語",
+        "Language / 언어 / 言語 / 语言",
         options=list(languages.keys()),
         format_func=lambda x: languages[x],
         index=list(languages.keys()).index(st.session_state.get('language', 'en'))
@@ -88,6 +104,11 @@ def main():
     st.title(t('app.title'))
     st.markdown(t('app.description'))
     
+    # Version info in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Talos v0.1.0**")
+    st.sidebar.caption("AI Task Orchestration System")
+    
     # Sidebar navigation
     st.sidebar.title("Navigation")
     tab_names = [
@@ -112,7 +133,39 @@ def main():
     elif selected_tab == t('ui.tabs.monitor'):
         show_monitor(managers)
 
-def show_dashboard(managers):
+def highlight_mentions(text: str) -> str:
+    """
+    Highlight @mentions in text with HTML/CSS formatting.
+    
+    Args:
+        text: Input text with potential @mentions
+        
+    Returns:
+        HTML formatted text with highlighted mentions
+    """
+    import re
+    
+    def replace_mention(match):
+        mention = match.group(0)
+        file_path = mention[1:]  # Remove @ prefix
+        
+        # Check if file exists
+        if os.path.exists(file_path):
+            # Green background for existing files
+            return f'<span style="background-color: #d4edda; color: #155724; padding: 2px 6px; border-radius: 3px; font-weight: 600;">{mention}</span>'
+        else:
+            # Yellow background for non-existing files
+            return f'<span style="background-color: #fff3cd; color: #856404; padding: 2px 6px; border-radius: 3px; font-weight: 600;">{mention}</span>'
+    
+    # Replace all @mentions with highlighted version
+    highlighted = re.sub(r'@[\w\-\.\/\\]+', replace_mention, text)
+    
+    # Preserve line breaks
+    highlighted = highlighted.replace('\n', '<br>')
+    
+    return highlighted
+
+def show_dashboard(managers: SystemManagers):
     """Dashboard tab"""
     st.header(t('ui.dashboard.title'))
     
@@ -123,7 +176,7 @@ def show_dashboard(managers):
         
         # AI Status
         try:
-            ai_client = get_ai_client(use_mock=False)
+            ai_client = get_vertex_client()
             ai_info = ai_client.get_model_info()
             
             st.success(f"**{t('ui.dashboard.ai_status')}:** {t('ui.dashboard.connected')}")
@@ -134,7 +187,7 @@ def show_dashboard(managers):
         
         # Task Summary
         st.subheader(t('ui.dashboard.task_summary'))
-        tasks = managers['task_manager'].list_tasks()
+        tasks = managers.task_manager.list_tasks()
         
         if tasks:
             task_counts = {
@@ -160,7 +213,7 @@ def show_dashboard(managers):
     
     with col2:
         st.subheader(t('ui.dashboard.context_info'))
-        context_info = managers['context_manager'].get_context_info()
+        context_info = managers.context_manager.get_context_info()
         
         st.metric(t('ui.dashboard.files_loaded'), context_info['file_count'])
         st.metric(t('ui.dashboard.total_tokens'), f"{context_info['total_tokens']:,}")
@@ -168,7 +221,7 @@ def show_dashboard(managers):
         # Recent Activity
         st.subheader(t('ui.dashboard.recent_activity'))
         if tasks:
-            recent_tasks = sorted(tasks, key=lambda x: x.created_at, reverse=True)[:5]
+            recent_tasks = sorted(tasks, key=lambda x: x.created_time, reverse=True)[:5]
             for task in recent_tasks:
                 status_emoji = {
                     TaskStatus.PENDING: '⏸️',
@@ -182,7 +235,7 @@ def show_dashboard(managers):
         else:
             st.info(t('ui.dashboard.no_activity'))
 
-def show_tasks(managers):
+def show_tasks(managers: SystemManagers):
     """Tasks tab"""
     st.header(t('ui.tasks.title'))
     
@@ -201,7 +254,7 @@ def show_tasks(managers):
                     with open(file_path, "wb") as f:
                         f.write(uploaded_task_file.getbuffer())
 
-                    tasks_loaded = managers['task_manager'].load_tasks_from_file(file_path)
+                    tasks_loaded = managers.task_manager.load_tasks_from_file(file_path)
                     os.remove(file_path) # Clean up temp file
 
                     st.session_state.processed_file_id = uploaded_task_file.file_id
@@ -218,6 +271,19 @@ def show_tasks(managers):
 
     # Task creation form
     with st.expander(t('ui.tasks.create'), expanded=True):
+        # Model refresh button (outside form)
+        refresh_col1, refresh_col2 = st.columns([6, 1])
+        with refresh_col2:
+            if st.button("🔄 Refresh Models", help="Refresh model list from Vertex AI API", key="refresh_models_create"):
+                with st.spinner("Refreshing models..."):
+                    try:
+                        new_models = managers.vertex_client.refresh_model_cache()
+                        st.success(f"Found {len(new_models)} models")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to refresh: {e}")
+        
         with st.form("create_task"):
             col1, col2 = st.columns(2)
             
@@ -236,18 +302,92 @@ def show_tasks(managers):
             prompt = st.text_area(
                 t('ui.tasks.prompt'),
                 placeholder=t('ui.tasks.prompt_placeholder'),
-                height=150
+                height=150,
+                key="task_prompt_input"
             )
+            
+            # Detect and display mentions with visual preview
+            if prompt:
+                import re
+                mentions = re.findall(r'@[\w\-\.\/\\]+', prompt)
+                if mentions:
+                    st.markdown("**📎 Detected Mentions:**")
+                    
+                    # Show highlighted preview
+                    st.markdown("**Preview with highlights:**")
+                    highlighted_prompt = highlight_mentions(prompt)
+                    st.markdown(
+                        f'<div style="background-color: #f8f9fa; padding: 12px; border-radius: 5px; border-left: 4px solid #007bff; max-height: 150px; overflow-y: auto;">{highlighted_prompt}</div>',
+                        unsafe_allow_html=True
+                    )
+                    
+                    # Show mention status badges
+                    st.markdown("**Mention Status:**")
+                    mention_cols = st.columns(min(len(mentions), 5))
+                    for idx, mention in enumerate(mentions):
+                        with mention_cols[idx % 5]:
+                            file_path = mention[1:]  # Remove @ prefix
+                            if os.path.exists(file_path):
+                                st.markdown(f'<span style="background-color: #d4edda; color: #155724; padding: 4px 8px; border-radius: 4px; font-size: 12px; display: inline-block; margin: 2px;">✅ {mention}</span>', unsafe_allow_html=True)
+                            else:
+                                st.markdown(f'<span style="background-color: #fff3cd; color: #856404; padding: 4px 8px; border-radius: 4px; font-size: 12px; display: inline-block; margin: 2px;">⚠️ {mention}</span>', unsafe_allow_html=True)
+            
+            # LLM Parameters
+            st.markdown("**LLM Parameters**")
+            llm_col1, llm_col2, llm_col3 = st.columns(3)
+            
+            with llm_col1:
+                temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.1, 
+                                      help="Controls randomness: 0=deterministic, 1=creative")
+                max_tokens = st.number_input("Max Output Tokens", 1000, 100000, 32000, 1000,
+                                            help="Maximum number of tokens in output")
+            
+            with llm_col2:
+                top_p = st.slider("Top-P", 0.0, 1.0, 1.0, 0.05,
+                                help="Nucleus sampling: considers top P probability mass")
+                top_k = st.number_input("Top-K", 1, 100, 40, 1,
+                                       help="Considers only top K most likely tokens")
+            
+            with llm_col3:
+                max_iterations = st.number_input("Max Agent Iterations", 1, 200, 100, 10,
+                                                help="Maximum iterations for agent tool use")
+            
+            # Model Configuration
+            st.markdown("**Model Configuration**")
+            model_col1, model_col2 = st.columns(2)
+            
+            # Get available models and locations from vertex client
+            available_models = managers.vertex_client.list_available_models()
+            available_locations = managers.vertex_client.list_available_locations()
+            
+            with model_col1:
+                model_name = st.selectbox("Model", 
+                                         options=available_models,
+                                         index=1,  # Default to gemini-2.5-flash-lite
+                                         help="Vertex AI model to use for this task")
+            
+            with model_col2:
+                location = st.selectbox("Region",
+                                       options=available_locations,
+                                       index=0,  # Default to us-central1
+                                       help="Google Cloud region for API calls")
             
             if st.form_submit_button(t('ui.tasks.create_button')):
                 if task_name and prompt:
                     try:
-                        task = managers['task_manager'].create_task(
+                        task = managers.task_manager.create_task(
                             name=task_name,
                             prompt=prompt,
                             description=task_description,
                             task_type=task_type,
-                            priority=priority
+                            priority=priority,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            top_p=top_p,
+                            top_k=top_k,
+                            max_iterations=max_iterations,
+                            model_name=model_name,
+                            location=location
                         )
                         
                         st.success(t('ui.tasks.created_success'))
@@ -261,7 +401,7 @@ def show_tasks(managers):
     
     # Task list
     st.subheader(t('ui.tasks.list'))
-    tasks = managers['task_manager'].list_tasks()
+    tasks = managers.task_manager.list_tasks()
     
     if tasks:
         for task in tasks:
@@ -286,37 +426,258 @@ def show_tasks(managers):
                     st.write(f"**{t('ui.tasks.status')}:** {task.status.value}")
                     st.write(f"**{t('ui.tasks.type')}:** {task.task_type.value}")
                     st.write(f"**{t('ui.tasks.priority')}:** {task.priority}")
+                    st.write(f"**LLM Temp:** {task.temperature}")
                 
                 with col3:
                     st.write(f"**{t('ui.tasks.actions')}:**")
                     
-                    action_col1, action_col2, action_col3 = st.columns(3)
+                    action_col1, action_col2, action_col3, action_col4 = st.columns(4)
                     
                     with action_col1:
-                        if st.button(t('ui.tasks.run'), key=f"run_{task.task_id}"):
-                            if managers['task_manager'].execute_task(task.task_id):
+                        if st.button("▶️ Run", key=f"run_{task.task_id}", use_container_width=True):
+                            if managers.task_manager.execute_task(task.task_id):
                                 st.success(t('ui.tasks.run_success'))
                                 st.rerun()
                             else:
                                 st.error(t('ui.tasks.run_failed'))
                     
                     with action_col2:
-                        if st.button(t('ui.tasks.cancel'), key=f"cancel_{task.task_id}"):
-                            if managers['task_manager'].cancel_task(task.task_id):
+                        if st.button("✏️ Edit", key=f"edit_{task.task_id}", use_container_width=True):
+                            st.session_state[f'editing_{task.task_id}'] = True
+                            st.rerun()
+                    
+                    with action_col3:
+                        if st.button("⏹️ Cancel", key=f"cancel_{task.task_id}", use_container_width=True):
+                            if managers.task_manager.cancel_task(task.task_id):
                                 st.success(t('ui.tasks.cancel_success'))
                                 st.rerun()
                     
-                    with action_col3:
-                        if st.button(t('ui.tasks.delete'), key=f"delete_{task.task_id}"):
-                            if managers['task_manager'].delete_task(task.task_id, delete_workspace=True):
+                    with action_col4:
+                        if st.button("🗑️ Delete", key=f"delete_{task.task_id}", use_container_width=True):
+                            if managers.task_manager.delete_task(task.task_id, delete_workspace=True):
                                 st.success(t('ui.tasks.delete_success'))
                                 st.rerun()
+                
+                # Edit form (if editing)
+                if st.session_state.get(f'editing_{task.task_id}', False):
+                    with st.form(f"edit_form_{task.task_id}"):
+                        st.markdown("### 📝 Edit Task")
+                        
+                        edit_col1, edit_col2 = st.columns(2)
+                        
+                        with edit_col1:
+                            new_name = st.text_input("Task Name", value=task.name, key=f"edit_name_{task.task_id}")
+                            new_description = st.text_area("Description", value=task.description, key=f"edit_desc_{task.task_id}")
+                            new_priority = st.slider("Priority", 0, 10, task.priority, key=f"edit_priority_{task.task_id}")
+                        
+                        with edit_col2:
+                            new_temp = st.slider("Temperature", 0.0, 1.0, task.temperature, 0.1, key=f"edit_temp_{task.task_id}")
+                            new_max_tokens = st.number_input("Max Tokens", 1000, 100000, task.max_tokens, 1000, key=f"edit_tokens_{task.task_id}")
+                            new_max_iter = st.number_input("Max Iterations", 1, 200, task.max_iterations, 10, key=f"edit_iter_{task.task_id}")
+                        
+                        # Model Configuration
+                        st.markdown("**Model Configuration**")
+                        model_edit_col1, model_edit_col2 = st.columns(2)
+                        
+                        # Get available models and locations
+                        available_models = managers.vertex_client.list_available_models()
+                        available_locations = managers.vertex_client.list_available_locations()
+                        
+                        with model_edit_col1:
+                            # Find current model index, fallback to default if not found
+                            try:
+                                current_model_index = available_models.index(task.model_name)
+                            except (ValueError, AttributeError):
+                                current_model_index = 1  # Default to gemini-2.5-flash-lite
+                            
+                            new_model = st.selectbox("Model", 
+                                                    options=available_models,
+                                                    index=current_model_index,
+                                                    key=f"edit_model_{task.task_id}")
+                        
+                        with model_edit_col2:
+                            # Find current location index, fallback to default if not found
+                            try:
+                                current_location_index = available_locations.index(task.location)
+                            except (ValueError, AttributeError):
+                                current_location_index = 0  # Default to us-central1
+                            
+                            new_location = st.selectbox("Region",
+                                                       options=available_locations,
+                                                       index=current_location_index,
+                                                       key=f"edit_location_{task.task_id}")
+                        
+                        new_prompt = st.text_area("Prompt", value=task.prompt, height=200, key=f"edit_prompt_{task.task_id}")
+                        
+                        # Detect and display mentions in edit form
+                        if new_prompt:
+                            import re
+                            mentions = re.findall(r'@[\w\-\.\/\\]+', new_prompt)
+                            if mentions:
+                                st.markdown("**📎 Detected Mentions:**")
+                                
+                                # Show highlighted preview
+                                st.markdown("**Preview with highlights:**")
+                                highlighted_prompt = highlight_mentions(new_prompt)
+                                st.markdown(
+                                    f'<div style="background-color: #f8f9fa; padding: 12px; border-radius: 5px; border-left: 4px solid #007bff; max-height: 120px; overflow-y: auto;">{highlighted_prompt}</div>',
+                                    unsafe_allow_html=True
+                                )
+                                
+                                # Show mention status badges
+                                st.markdown("**Mention Status:**")
+                                mention_cols = st.columns(min(len(mentions), 5))
+                                for idx, mention in enumerate(mentions):
+                                    with mention_cols[idx % 5]:
+                                        file_path = mention[1:]  # Remove @ prefix
+                                        if os.path.exists(file_path):
+                                            st.markdown(f'<span style="background-color: #d4edda; color: #155724; padding: 4px 8px; border-radius: 4px; font-size: 12px; display: inline-block; margin: 2px;">✅ {mention}</span>', unsafe_allow_html=True)
+                                        else:
+                                            st.markdown(f'<span style="background-color: #fff3cd; color: #856404; padding: 4px 8px; border-radius: 4px; font-size: 12px; display: inline-block; margin: 2px;">⚠️ {mention}</span>', unsafe_allow_html=True)
+                        
+                        form_col1, form_col2 = st.columns(2)
+                        with form_col1:
+                            if st.form_submit_button("💾 Save Changes"):
+                                if managers.task_manager.update_task(
+                                    task.task_id,
+                                    name=new_name,
+                                    description=new_description,
+                                    prompt=new_prompt,
+                                    priority=new_priority,
+                                    temperature=new_temp,
+                                    max_tokens=new_max_tokens,
+                                    max_iterations=new_max_iter,
+                                    model_name=new_model,
+                                    location=new_location
+                                ):
+                                    st.success("Task updated successfully!")
+                                    st.session_state[f'editing_{task.task_id}'] = False
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to update task. Check if task is in editable state (PENDING or FAILED).")
+                        
+                        with form_col2:
+                            if st.form_submit_button("❌ Cancel"):
+                                st.session_state[f'editing_{task.task_id}'] = False
+                                st.rerun()
+                
+                # Task details expander
+                with st.expander(f"📊 Details & Outputs - {task.name}", expanded=False):
+                    detail_tab1, detail_tab2, detail_tab3 = st.tabs(["⚙️ Configuration", "📄 Logs & Files", "📈 Steps"])
+                    
+                    with detail_tab1:
+                        st.markdown("**LLM Parameters:**")
+                        param_col1, param_col2 = st.columns(2)
+                        with param_col1:
+                            st.write(f"• Temperature: `{task.temperature}`")
+                            st.write(f"• Max Tokens: `{task.max_tokens}`")
+                            st.write(f"• Max Iterations: `{task.max_iterations}`")
+                        with param_col2:
+                            st.write(f"• Top-P: `{task.top_p}`")
+                            st.write(f"• Top-K: `{task.top_k}`")
+                        
+                        st.markdown("**Model Configuration:**")
+                        model_info_col1, model_info_col2 = st.columns(2)
+                        with model_info_col1:
+                            st.write(f"• Model: `{task.model_name}`")
+                        with model_info_col2:
+                            st.write(f"• Region: `{task.location}`")
+                        
+                        st.markdown("**Directories:**")
+                        st.write(f"• Workspace: `{task.workspace_dir}`")
+                        st.write(f"• Output: `{task.output_dir}`")
+                    
+                    with detail_tab2:
+                        # Log file viewer
+                        if task.output_dir and os.path.exists(task.output_dir):
+                            log_file = os.path.join(task.output_dir, "task.log")
+                            if os.path.exists(log_file):
+                                st.markdown("**📝 Task Log:**")
+                                with open(log_file, 'r', encoding='utf-8') as f:
+                                    log_content = f.read()
+                                st.text_area("Log Content", log_content, height=300, key=f"log_{task.task_id}")
+                                
+                                # Download button
+                                st.download_button(
+                                    "⬇️ Download Log",
+                                    log_content,
+                                    file_name=f"{task.name}_task.log",
+                                    mime="text/plain",
+                                    key=f"dl_log_{task.task_id}"
+                                )
+                            
+                            # Output files
+                            st.markdown("**📁 Output Files:**")
+                            output_files = []
+                            if os.path.exists(task.output_dir):
+                                for file in os.listdir(task.output_dir):
+                                    file_path = os.path.join(task.output_dir, file)
+                                    if os.path.isfile(file_path):
+                                        output_files.append((file, file_path))
+                            
+                            if output_files:
+                                for filename, filepath in output_files:
+                                    file_col1, file_col2 = st.columns([3, 1])
+                                    with file_col1:
+                                        st.write(f"📄 `{filename}`")
+                                    with file_col2:
+                                        try:
+                                            with open(filepath, 'r', encoding='utf-8') as f:
+                                                file_content = f.read()
+                                            st.download_button(
+                                                "⬇️",
+                                                file_content,
+                                                file_name=filename,
+                                                key=f"dl_{task.task_id}_{filename}"
+                                            )
+                                        except:
+                                            st.write("Binary file")
+                                
+                                # File viewer
+                                selected_file = st.selectbox(
+                                    "View file content:",
+                                    options=[f[0] for f in output_files],
+                                    key=f"view_{task.task_id}"
+                                )
+                                if selected_file:
+                                    file_path = next(fp for fn, fp in output_files if fn == selected_file)
+                                    try:
+                                        with open(file_path, 'r', encoding='utf-8') as f:
+                                            content = f.read()
+                                        st.text_area(f"Content of {selected_file}", content, height=200, key=f"content_{task.task_id}_{selected_file}")
+                                    except Exception as e:
+                                        st.error(f"Cannot read file: {e}")
+                            else:
+                                st.info("No output files yet")
+                        else:
+                            st.info("No output directory found")
+                    
+                    with detail_tab3:
+                        # Task steps
+                        if task.steps:
+                            for step in task.steps:
+                                step_emoji = {
+                                    TaskStatus.PENDING: '⏸️',
+                                    TaskStatus.RUNNING: '🔄',
+                                    TaskStatus.COMPLETED: '✅',
+                                    TaskStatus.FAILED: '❌'
+                                }.get(step.status, '❓')
+                                
+                                step_col1, step_col2 = st.columns([3, 1])
+                                with step_col1:
+                                    st.write(f"{step_emoji} **{step.description}**")
+                                with step_col2:
+                                    if step.start_time and step.end_time:
+                                        duration = step.end_time - step.start_time
+                                        st.write(f"⏱️ {duration:.2f}s")
+                        else:
+                            st.info("No steps available")
                 
                 st.divider()
     else:
         st.info(t('ui.tasks.no_tasks'))
 
-def show_files(managers):
+def show_files(managers: SystemManagers):
     """Files tab"""
     st.header(t('ui.files.title'))
     
@@ -332,7 +693,7 @@ def show_files(managers):
         if uploaded_file:
             try:
                 content = uploaded_file.read().decode('utf-8')
-                managers['file_manager'].write_file(uploaded_file.name, content)
+                managers.file_manager.write_file(uploaded_file.name, content)
                 st.success(f"File uploaded: {uploaded_file.name}")
                 st.rerun()
             except Exception as e:
@@ -354,7 +715,7 @@ def show_files(managers):
                 if st.form_submit_button(t('ui.files.create')):
                     if filename:
                         try:
-                            managers['file_manager'].write_file(filename, content or "")
+                            managers.file_manager.write_file(filename, content or "")
                             st.success(t('ui.files.create_success'))
                             st.session_state.show_create_file = False
                             st.rerun()
@@ -405,7 +766,7 @@ def show_files(managers):
                 with col4:
                     if st.button(t('ui.files.view'), key=f"view_{file_info['name']}"):
                         try:
-                            content = managers['file_manager'].read_file(file_info['path'])
+                            content = managers.file_manager.read_file(file_info['path'])
                             st.text_area(f"Content of {file_info['name']}", content, height=300)
                         except Exception as e:
                             st.error(f"Error reading file: {e}")
@@ -415,7 +776,7 @@ def show_files(managers):
     except Exception as e:
         st.error(f"Error listing files: {e}")
 
-def show_context(managers):
+def show_context(managers: SystemManagers):
     """Context tab"""
     st.header(t('ui.context.title'))
     
@@ -431,7 +792,7 @@ def show_context(managers):
         if st.button(t('ui.context.process')):
             if mention_text:
                 try:
-                    successful, failed = managers['context_manager'].process_mentions(mention_text)
+                    successful, failed = managers.context_manager.process_mentions(mention_text)
                     
                     if successful:
                         st.success(t('ui.context.mentions_processed'))
@@ -452,7 +813,7 @@ def show_context(managers):
     
     # Current context
     st.subheader(t('ui.context.current_context'))
-    context_info = managers['context_manager'].get_context_info()
+    context_info = managers.context_manager.get_context_info()
     
     col1, col2 = st.columns(2)
     with col1:
@@ -461,7 +822,7 @@ def show_context(managers):
         st.metric(t('ui.context.token_count'), f"{context_info['total_tokens']:,}")
     
     # Context files list
-    context_files = managers['context_manager'].get_context_files()
+    context_files = managers.context_manager.get_context_files()
     
     if context_files:
         st.subheader(t('ui.context.context_files'))
@@ -475,7 +836,7 @@ def show_context(managers):
             with col2:
                 if st.button(t('ui.context.view_content'), key=f"view_ctx_{file_path}"):
                     try:
-                        content = managers['file_manager'].read_file(file_path)
+                        content = managers.file_manager.read_file(file_path)
                         st.text_area(f"Content", content[:1000] + "..." if len(content) > 1000 else content)
                     except Exception as e:
                         st.error(f"Error: {e}")
@@ -483,7 +844,7 @@ def show_context(managers):
             with col3:
                 if st.button(t('ui.context.remove'), key=f"remove_ctx_{file_path}"):
                     try:
-                        managers['context_manager'].remove_file(file_path)
+                        managers.context_manager.remove_file(file_path)
                         st.success(f"Removed {file_path}")
                         st.rerun()
                     except Exception as e:
@@ -493,12 +854,12 @@ def show_context(managers):
     
     # Clear context
     if st.button(t('ui.context.clear_context')):
-        managers['context_manager'].clear_context()
+        managers.context_manager.clear_context()
         st.success(t('ui.context.context_cleared'))
         logger.info("Context cleared by user.")
         st.rerun()
 
-def show_monitor(managers):
+def show_monitor(managers: SystemManagers):
     """Monitor tab"""
     st.header(t('ui.monitor.title'))
     
@@ -522,7 +883,7 @@ def show_monitor(managers):
         st.subheader(t('ui.monitor.performance'))
         
         # Task distribution chart
-        tasks = managers['task_manager'].list_tasks()
+        tasks = managers.task_manager.list_tasks()
         if tasks:
             task_status_counts = {}
             for task in tasks:

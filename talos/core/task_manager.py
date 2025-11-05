@@ -73,6 +73,15 @@ class Task:
     csv_parameters: List[Dict[str, Any]] = field(default_factory=list)
     parallel_batch_id: Optional[str] = None
     
+    # LLM parameters
+    temperature: float = 0.7
+    max_tokens: int = 32000
+    top_p: float = 1.0
+    top_k: int = 40
+    max_iterations: int = 100
+    model_name: str = "gemini-2.5-flash-lite"
+    location: str = "us-central1"
+    
     # Metadata
     created_time: float = field(default_factory=time.time)
     start_time: Optional[float] = None
@@ -120,7 +129,14 @@ class TaskManager:
         task_type: TaskType = TaskType.SINGLE,
         workspace_name: Optional[str] = None,
         priority: int = 0,
-        dependencies: Optional[List[str]] = None
+        dependencies: Optional[List[str]] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 32000,
+        top_p: float = 1.0,
+        top_k: int = 40,
+        max_iterations: int = 100,
+        model_name: str = "gemini-2.5-flash-lite",
+        location: str = "us-central1"
     ) -> Task:
         """
         Creates a new task.
@@ -133,6 +149,13 @@ class TaskManager:
             workspace_name: The name of the workspace (auto-generated if None).
             priority: The priority of the task.
             dependencies: A list of dependent task IDs.
+            temperature: LLM temperature (0.0-1.0).
+            max_tokens: Maximum output tokens.
+            top_p: Nucleus sampling parameter.
+            top_k: Top-k sampling parameter.
+            max_iterations: Maximum agent iterations.
+            model_name: Vertex AI model name.
+            location: Vertex AI location/region.
             
         Returns:
             The created task.
@@ -172,7 +195,14 @@ class TaskManager:
                 output_dir=str(output_dir),
                 csv_parameters=csv_parameters,
                 dependencies=dependencies or [],
-                priority=priority
+                priority=priority,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                top_k=top_k,
+                max_iterations=max_iterations,
+                model_name=model_name,
+                location=location
             )
             
             # Create initial steps
@@ -267,8 +297,8 @@ class TaskManager:
         if status_filter:
             tasks = [t for t in tasks if t.status == status_filter]
         
-        # Sort by priority and creation time
-        tasks.sort(key=lambda t: (-t.priority, t.created_time))
+        # Sort by creation time (newest first), then by priority
+        tasks.sort(key=lambda t: (-t.created_time, -t.priority))
         
         return tasks
     
@@ -318,7 +348,9 @@ class TaskManager:
                 self._activate_dependent_tasks(task_id)
             else:
                 task.status = TaskStatus.FAILED
-                logger.warning(f"Task failed: {task_id}")
+                logger.error(f"Task failed: {task_id}")
+                if task.error:
+                    logger.error(f"Task error details: {task.error}")
             
             # Save state
             self.save_state()
@@ -380,8 +412,12 @@ Please perform the task based on the context and request above."""
             result = self.ai_client.generate_with_context(
                 task.prompt,
                 context_xml,
-                temperature=0.0,
-                workspace_dir=task.workspace_dir
+                temperature=task.temperature,
+                max_tokens=task.max_tokens,
+                workspace_dir=task.workspace_dir,
+                max_iterations=task.max_iterations,
+                model_name=task.model_name,
+                location=task.location
             )
             
             task.result = result
@@ -469,7 +505,12 @@ Please perform the individual task based on the information above."""
                 result = self.ai_client.generate_with_context(
                     prompt, 
                     context_xml,
-                    workspace_dir=output_dir
+                    temperature=task.temperature,
+                    max_tokens=task.max_tokens,
+                    workspace_dir=output_dir,
+                    max_iterations=task.max_iterations,
+                    model_name=task.model_name,
+                    location=task.location
                 )
                 
                 # Save result file
@@ -674,6 +715,86 @@ Please perform the individual task based on the information above."""
             return True
         
         return False
+    
+    def update_task(
+        self,
+        task_id: str,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        prompt: Optional[str] = None,
+        priority: Optional[int] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        max_iterations: Optional[int] = None,
+        model_name: Optional[str] = None,
+        location: Optional[str] = None
+    ) -> bool:
+        """
+        Updates a task's properties.
+        
+        Args:
+            task_id: The ID of the task to update.
+            name: New task name (optional).
+            description: New description (optional).
+            prompt: New prompt (optional).
+            priority: New priority (optional).
+            temperature: New temperature (optional).
+            max_tokens: New max tokens (optional).
+            top_p: New top_p (optional).
+            top_k: New top_k (optional).
+            max_iterations: New max_iterations (optional).
+            model_name: New model name (optional).
+            location: New location/region (optional).
+            
+        Returns:
+            True if update was successful, False otherwise.
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            logger.warning(f"Task not found for update: {task_id}")
+            return False
+        
+        # Can only update pending or failed tasks
+        if task.status not in [TaskStatus.PENDING, TaskStatus.FAILED]:
+            logger.warning(f"Cannot update task in status: {task.status}")
+            return False
+        
+        # Update fields
+        if name is not None:
+            task.name = name
+        if description is not None:
+            task.description = description
+        if prompt is not None:
+            task.prompt = prompt
+        if priority is not None:
+            task.priority = priority
+        if temperature is not None:
+            task.temperature = temperature
+        if max_tokens is not None:
+            task.max_tokens = max_tokens
+        if top_p is not None:
+            task.top_p = top_p
+        if top_k is not None:
+            task.top_k = top_k
+        if max_iterations is not None:
+            task.max_iterations = max_iterations
+        if model_name is not None:
+            task.model_name = model_name
+        if location is not None:
+            task.location = location
+        
+        # If failed task is updated, reset to pending
+        if task.status == TaskStatus.FAILED:
+            task.status = TaskStatus.PENDING
+            task.error = None
+            if task_id not in self.task_queue:
+                self.task_queue.append(task_id)
+        
+        self.save_state()
+        logger.info(f"Task updated: {task_id}")
+        return True
     
     def delete_task(self, task_id: str, delete_workspace: bool = False) -> bool:
         """Deletes a task."""

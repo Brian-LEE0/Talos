@@ -21,6 +21,11 @@ import re
 class VertexAIClient:
     """Vertex AI client class for AI model interactions"""
     
+    # Class-level cache for available models
+    _model_cache = None
+    _model_cache_timestamp = None
+    _model_cache_ttl = 3600  # Cache for 1 hour
+    
     def __init__(self, credentials_path: str = "vertex-ai-credentials.json"):
         """
         Initialize Vertex AI client
@@ -156,7 +161,9 @@ class VertexAIClient:
         temperature: float = 0.0,
         max_tokens: int = 32000,
         workspace_dir: Optional[str] = None,
-        max_iterations: int = 100
+        max_iterations: int = 100,
+        model_name: Optional[str] = None,
+        location: Optional[str] = None
     ) -> str:
         """
         Generate text with context using agentic loop.
@@ -169,6 +176,8 @@ class VertexAIClient:
             max_tokens: Maximum token count
             workspace_dir: Working directory for file operations
             max_iterations: Maximum number of agent iterations
+            model_name: Override default model name
+            location: Override default location
             
         Returns:
             Generated text
@@ -179,7 +188,9 @@ class VertexAIClient:
             temperature=temperature,
             max_tokens=max_tokens,
             workspace_dir=workspace_dir,
-            max_iterations=max_iterations
+            max_iterations=max_iterations,
+            model_name=model_name,
+            location=location
         )
     
     def _agent_execute(
@@ -189,7 +200,9 @@ class VertexAIClient:
         temperature: float = 0.0,
         max_tokens: int = 32000,
         workspace_dir: Optional[str] = None,
-        max_iterations: int = 5
+        max_iterations: int = 5,
+        model_name: Optional[str] = None,
+        location: Optional[str] = None
     ) -> str:
         """
         Execute AI agent with tool use capabilities.
@@ -205,36 +218,57 @@ class VertexAIClient:
             max_tokens: Maximum token count
             workspace_dir: Working directory for file operations
             max_iterations: Maximum iterations
+            model_name: Override default model name
+            location: Override default location
             
         Returns:
             Final AI response
         """
         # System instruction for tool use
-        system_instruction = """You are an intelligent AI assistant with the ability to read files and search for files when needed.
-
-When you need to read a file, use this format:
-<read_file path="path/to/file.py"></read_file>
-
-When you need to search for files, use this format:
-<search_files pattern="*.py" directory="."></search_files>
-
-After using these tools, you will receive the results and can continue your analysis.
-You can use multiple tools in one response if needed.
-When you have all the information you need, provide your final answer without any tool tags.
+        system_instruction = """You are an intelligent AI assistant with the ability to manage files and tasks.
 
 Available tools:
-1. read_file: Read the contents of a file
-2. search_files: Search for files matching a pattern
 
-Use these tools wisely to gather the information you need to complete the task."""
+1. **read_file**: Read the contents of a file
+<read_file path="path/to/file.py"></read_file>
+
+2. **search_files**: Search for files matching a pattern
+<search_files pattern="*.py" directory="."></search_files>
+
+3. **create_file**: Create a new file with content
+<create_file path="path/to/newfile.txt">
+File content goes here...
+</create_file>
+
+4. **update_file**: Update specific lines in an existing file
+<update_file path="path/to/file.py" start_line="10" end_line="15">
+New content for lines 10-15...
+</update_file>
+
+5. **delete_file**: Delete a file
+<delete_file path="path/to/file.txt"></delete_file>
+
+6. **create_task**: Create a new sub-task for complex workflows
+<create_task name="Task Name" description="Task description" type="single" priority="0">
+Task prompt goes here...
+</create_task>
+
+7. **finish**: Mark the task as complete and stop iteration
+<finish>
+Task completed successfully. Summary: ...
+</finish>
+
+After using tools, you will receive results and can continue working.
+Use multiple tools in one response if needed.
+When you finish all work, use <finish> to complete the task."""
 
         # Build initial prompt
         if context:
-            full_prompt = f"""Context:
-{context}
-
-User Request:
+            full_prompt = f"""User Request:
 {prompt}
+
+Context:
+{context}
 
 Please analyze the request and use the available tools if you need additional information."""
         else:
@@ -256,19 +290,39 @@ Please analyze the request and use the available tools if you need additional in
                     current_prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    system_instruction=system_instruction
+                    system_instruction=system_instruction,
+                    model_name=model_name,
+                    location=location
                 )
             except Exception as e:
                 logger.error(f"AI generation failed: {e}", exc_info=True)
                 raise
             
             # Check for tool usage
+            has_finish = '<finish' in response
             has_read_file = '<read_file' in response
             has_search_files = '<search_files' in response
+            has_create_file = '<create_file' in response
+            has_update_file = '<update_file' in response
+            has_delete_file = '<delete_file' in response
+            has_create_task = '<create_task' in response
             
-            logger.info(f"Tool usage detected: read_file={has_read_file}, search_files={has_search_files}")
+            logger.info(f"Tool usage detected: finish={has_finish}, read_file={has_read_file}, search_files={has_search_files}, create_file={has_create_file}, update_file={has_update_file}, delete_file={has_delete_file}, create_task={has_create_task}")
             
-            if not has_read_file and not has_search_files:
+            # If finish is called, stop iteration
+            if has_finish:
+                finish_pattern = re.compile(r'<finish>(.*?)</finish>', re.DOTALL | re.IGNORECASE)
+                finish_match = finish_pattern.search(response)
+                if finish_match:
+                    finish_message = finish_match.group(1).strip()
+                    logger.info(f"✅ Agent finished with message: {finish_message}")
+                    # Remove finish tag from response
+                    response = finish_pattern.sub('', response).strip()
+                logger.info(f"✅ Agent completed successfully in {iteration + 1} iterations")
+                logger.info("="*80)
+                return response
+            
+            if not has_read_file and not has_search_files and not has_create_file and not has_update_file and not has_delete_file and not has_create_task:
                 # No tools requested, return final response
                 logger.info(f"✅ Agent completed successfully in {iteration + 1} iterations")
                 logger.info("="*80)
@@ -303,6 +357,66 @@ Please analyze the request and use the available tools if you need additional in
                     directory = match.group(2)
                     result = self._execute_search_files(pattern, directory, workspace_dir)
                     tool_results.append(f"<tool_result tool='search_files' pattern='{pattern}' directory='{directory}'>\n{result}\n</tool_result>")
+            
+            # Handle create_file requests
+            if has_create_file:
+                create_file_pattern = re.compile(
+                    r'<create_file\s+path=["\']([^"\']+)["\']\s*>(.*?)</create_file>',
+                    re.DOTALL | re.IGNORECASE
+                )
+                matches = list(create_file_pattern.finditer(response))
+                logger.info(f"Found {len(matches)} create_file request(s)")
+                for match in matches:
+                    file_path = match.group(1)
+                    content = match.group(2).strip()
+                    result = self._execute_create_file(file_path, content, workspace_dir)
+                    tool_results.append(f"<tool_result tool='create_file' path='{file_path}'>\n{result}\n</tool_result>")
+            
+            # Handle update_file requests
+            if has_update_file:
+                update_file_pattern = re.compile(
+                    r'<update_file\s+path=["\']([^"\']+)["\']\s+start_line=["\'](\d+)["\']\s+end_line=["\'](\d+)["\']\s*>(.*?)</update_file>',
+                    re.DOTALL | re.IGNORECASE
+                )
+                matches = list(update_file_pattern.finditer(response))
+                logger.info(f"Found {len(matches)} update_file request(s)")
+                for match in matches:
+                    file_path = match.group(1)
+                    start_line = int(match.group(2))
+                    end_line = int(match.group(3))
+                    new_content = match.group(4).strip()
+                    result = self._execute_update_file(file_path, start_line, end_line, new_content, workspace_dir)
+                    tool_results.append(f"<tool_result tool='update_file' path='{file_path}'>\n{result}\n</tool_result>")
+            
+            # Handle delete_file requests
+            if has_delete_file:
+                delete_file_pattern = re.compile(
+                    r'<delete_file\s+path=["\']([^"\']+)["\']\s*(?:/>|></delete_file>)',
+                    re.IGNORECASE
+                )
+                matches = list(delete_file_pattern.finditer(response))
+                logger.info(f"Found {len(matches)} delete_file request(s)")
+                for match in matches:
+                    file_path = match.group(1)
+                    result = self._execute_delete_file(file_path, workspace_dir)
+                    tool_results.append(f"<tool_result tool='delete_file' path='{file_path}'>\n{result}\n</tool_result>")
+            
+            # Handle create_task requests
+            if has_create_task:
+                create_task_pattern = re.compile(
+                    r'<create_task\s+name=["\']([^"\']+)["\']\s+description=["\']([^"\']*)["\']\s+type=["\']([^"\']+)["\']\s+priority=["\'](\d+)["\']\s*>(.*?)</create_task>',
+                    re.DOTALL | re.IGNORECASE
+                )
+                matches = list(create_task_pattern.finditer(response))
+                logger.info(f"Found {len(matches)} create_task request(s)")
+                for match in matches:
+                    task_name = match.group(1)
+                    task_description = match.group(2)
+                    task_type = match.group(3)
+                    priority = match.group(4)
+                    task_prompt = match.group(5).strip()
+                    result = self._execute_create_task(task_name, task_description, task_type, priority, task_prompt)
+                    tool_results.append(f"<tool_result tool='create_task' name='{task_name}'>\n{result}\n</tool_result>")
             
             if not tool_results:
                 # No valid tools found, return response
@@ -445,6 +559,169 @@ Please continue your analysis with this new information. If you need more inform
             logger.error(error_msg)
             return f"ERROR: {error_msg}"
     
+    def _execute_create_file(self, file_path: str, content: str, workspace_dir: Optional[str]) -> str:
+        """Execute create_file tool."""
+        try:
+            # Resolve path
+            if not os.path.isabs(file_path):
+                if workspace_dir:
+                    file_path = os.path.join(workspace_dir, file_path)
+                else:
+                    file_path = os.path.abspath(file_path)
+            
+            # Create file
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            self.file_manager.create_file(file_path, content, overwrite=True)
+            
+            logger.info(f"✅ Created file: {file_path}")
+            
+            # Update context manager to include new file
+            from .context_manager import get_context_manager
+            context_manager = get_context_manager()
+            context_manager.add_file_to_context(file_path, force_reload=True)
+            
+            return f"SUCCESS: File created at {file_path}\nSize: {len(content)} bytes"
+            
+        except Exception as e:
+            error_msg = f"Failed to create file '{file_path}': {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return f"ERROR: {error_msg}"
+    
+    def _execute_update_file(self, file_path: str, start_line: int, end_line: int, new_content: str, workspace_dir: Optional[str]) -> str:
+        """Execute update_file tool - updates specific lines in a file."""
+        try:
+            # Resolve path (use same strategies as read_file)
+            possible_paths = []
+            if workspace_dir:
+                possible_paths.append(os.path.join(workspace_dir, file_path))
+            if os.path.isabs(file_path):
+                possible_paths.append(file_path)
+            possible_paths.append(os.path.abspath(file_path))
+            if workspace_dir and 'workspaces' in workspace_dir:
+                workspace_parent = Path(workspace_dir)
+                while workspace_parent.name != 'workspaces' and workspace_parent.parent != workspace_parent:
+                    workspace_parent = workspace_parent.parent
+                if workspace_parent.name == 'workspaces':
+                    project_root = workspace_parent.parent
+                    possible_paths.append(os.path.join(str(project_root), file_path))
+            
+            resolved_path = None
+            for p in possible_paths:
+                if os.path.exists(p):
+                    resolved_path = p
+                    break
+            
+            if not resolved_path:
+                return f"ERROR: File not found: {file_path}"
+            
+            # Read existing content
+            with open(resolved_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            # Validate line numbers
+            if start_line < 1 or end_line > len(lines) or start_line > end_line:
+                return f"ERROR: Invalid line range. File has {len(lines)} lines, requested {start_line}-{end_line}"
+            
+            # Update lines (convert to 0-indexed)
+            new_lines = new_content.split('\n')
+            lines[start_line-1:end_line] = [line + '\n' for line in new_lines]
+            
+            # Write back
+            with open(resolved_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+            
+            logger.info(f"✅ Updated file: {resolved_path}, lines {start_line}-{end_line}")
+            
+            # Update context manager
+            from .context_manager import get_context_manager
+            context_manager = get_context_manager()
+            context_manager.add_file_to_context(resolved_path, force_reload=True)
+            
+            return f"SUCCESS: Updated {resolved_path} lines {start_line}-{end_line}\nNew content ({len(new_lines)} lines):\n{new_content[:200]}..."
+            
+        except Exception as e:
+            error_msg = f"Failed to update file '{file_path}': {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return f"ERROR: {error_msg}"
+    
+    def _execute_delete_file(self, file_path: str, workspace_dir: Optional[str]) -> str:
+        """Execute delete_file tool."""
+        try:
+            # Resolve path
+            possible_paths = []
+            if workspace_dir:
+                possible_paths.append(os.path.join(workspace_dir, file_path))
+            if os.path.isabs(file_path):
+                possible_paths.append(file_path)
+            possible_paths.append(os.path.abspath(file_path))
+            
+            resolved_path = None
+            for p in possible_paths:
+                if os.path.exists(p):
+                    resolved_path = p
+                    break
+            
+            if not resolved_path:
+                return f"ERROR: File not found: {file_path}"
+            
+            # Delete file
+            os.remove(resolved_path)
+            
+            logger.info(f"✅ Deleted file: {resolved_path}")
+            
+            # Remove from context manager
+            from .context_manager import get_context_manager
+            context_manager = get_context_manager()
+            if resolved_path in context_manager.context_files:
+                del context_manager.context_files[resolved_path]
+            
+            return f"SUCCESS: Deleted file {resolved_path}"
+            
+        except Exception as e:
+            error_msg = f"Failed to delete file '{file_path}': {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return f"ERROR: {error_msg}"
+    
+    def _execute_create_task(self, name: str, description: str, task_type: str, priority: str, prompt: str) -> str:
+        """Execute create_task tool."""
+        try:
+            # Import here to avoid circular dependency
+            from .task_manager import get_task_manager, TaskType
+            
+            task_manager = get_task_manager()
+            
+            # Convert task_type string to TaskType enum
+            task_type_map = {
+                'single': TaskType.SINGLE,
+                'parallel': TaskType.PARALLEL,
+                'sequential': TaskType.SEQUENTIAL
+            }
+            task_type_enum = task_type_map.get(task_type.lower(), TaskType.SINGLE)
+            
+            # Create the task
+            new_task = task_manager.create_task(
+                name=name,
+                prompt=prompt,
+                description=description,
+                task_type=task_type_enum,
+                priority=int(priority)
+            )
+            
+            logger.info(f"✅ Created new task: {new_task.task_id} - {name}")
+            
+            return f"SUCCESS: Task created successfully!\n" \
+                   f"Task ID: {new_task.task_id}\n" \
+                   f"Name: {name}\n" \
+                   f"Type: {task_type}\n" \
+                   f"Priority: {priority}\n" \
+                   f"Workspace: {new_task.workspace_dir}\n" \
+                   f"The task has been added to the queue and can be executed later."
+            
+        except Exception as e:
+            error_msg = f"Failed to create task '{name}': {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return f"ERROR: {error_msg}"
+    
     def analyze_task_prompt(self, prompt: str) -> Dict[str, Any]:
         """
         Analyze prompt to extract task information
@@ -496,6 +773,196 @@ Please respond only in JSON format."""
             "model_name": self.model_name,
             "status": "Connected" if self._model else "Disconnected"
         }
+    
+    def list_available_models(self, use_api: bool = True, use_cache: bool = True) -> List[str]:
+        """
+        Get list of available Gemini models.
+        
+        Args:
+            use_api: If True, fetch models dynamically from Vertex AI API.
+                     If False, return curated static list.
+            use_cache: If True, use cached results if available and not expired.
+        
+        Returns:
+            List of model names
+        """
+        # Check cache first
+        if use_cache and self._is_cache_valid():
+            logger.debug(f"Using cached model list ({len(self._model_cache)} models)")
+            return self._model_cache.copy()
+        
+        if use_api:
+            try:
+                # Method 1: Try to use aiplatform API to list publisher models
+                from google.cloud import aiplatform_v1
+                
+                credentials = service_account.Credentials.from_service_account_file(
+                    self.credentials_path,
+                    scopes=['https://www.googleapis.com/auth/cloud-platform']
+                )
+                
+                # Create client for model service
+                client = aiplatform_v1.ModelServiceClient(credentials=credentials)
+                
+                # List publisher models (Google's official models)
+                # Publisher models are in the format: publishers/google/models/*
+                parent = "publishers/google/locations/us-central1"
+                
+                try:
+                    request = aiplatform_v1.ListPublisherModelsRequest(parent=parent)
+                    models = []
+                    
+                    # Fetch all publisher models
+                    page_result = client.list_publisher_models(request=request)
+                    
+                    for model in page_result:
+                        model_id = model.name.split('/')[-1]
+                        # Filter only Gemini models
+                        if 'gemini' in model_id.lower():
+                            models.append(model_id)
+                            logger.debug(f"Found model via API: {model_id}")
+                    
+                    if models:
+                        # Sort by version (newest first)
+                        models.sort(reverse=True)
+                        logger.info(f"✅ Found {len(models)} Gemini models via Vertex AI API")
+                        
+                        # Update cache
+                        self._update_cache(models)
+                        
+                        return models
+                        
+                except Exception as api_error:
+                    logger.debug(f"Publisher model listing failed: {api_error}")
+                
+                # Method 2: Fallback - Try to instantiate known model patterns
+                logger.info("Trying fallback method: testing model availability...")
+                from vertexai.generative_models import GenerativeModel
+                
+                # Extended model patterns including future versions
+                model_patterns = [
+                    # Latest experimental/preview models
+                    "gemini-2.5-flash",
+                    "gemini-2.5-pro",
+                    "gemini-2.0-flash-exp",
+                    "gemini-2.0-pro-exp",
+                    
+                    # Current stable models
+                    "gemini-2.5-flash-lite",
+                    "gemini-1.5-pro-002",
+                    "gemini-1.5-flash-002",
+                    "gemini-1.5-pro-001",
+                    "gemini-1.5-flash-001",
+                    
+                    # Legacy models
+                    "gemini-1.0-pro-002",
+                    "gemini-1.0-pro-001",
+                    "gemini-1.0-pro",
+                    "gemini-pro",
+                    
+                    # Future-proofing patterns
+                    "gemini-2.5-pro-002",
+                    "gemini-2.5-pro-001",
+                    "gemini-2.0-flash-002",
+                    "gemini-2.0-flash-001",
+                    "gemini-2.0-pro-002",
+                    "gemini-2.0-pro-001",
+                ]
+                
+                available_models = []
+                
+                # Test each model to see if it's available
+                for model_name in model_patterns:
+                    try:
+                        # Quick validation by attempting to create model instance
+                        test_model = GenerativeModel(model_name)
+                        available_models.append(model_name)
+                        logger.debug(f"✓ Model {model_name} is available")
+                    except Exception as e:
+                        logger.debug(f"✗ Model {model_name} not available: {e}")
+                        continue
+                
+                if available_models:
+                    logger.info(f"✅ Found {len(available_models)} available models via testing")
+                    
+                    # Update cache
+                    self._update_cache(available_models)
+                    
+                    return available_models
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Could not fetch models dynamically: {e}")
+                logger.info("Falling back to static curated model list")
+        
+        # Fallback: Curated static list (updated regularly)
+        # This list is used when API access fails or use_api=False
+        # Source: https://cloud.google.com/vertex-ai/generative-ai/docs/learn/models
+        logger.info("Using static model list")
+        static_models = [
+            # Latest models (as of 2025)
+            "gemini-2.0-flash-exp",
+            "gemini-2.5-flash-lite",
+            
+            # Stable production models
+            "gemini-1.5-pro-002",
+            "gemini-1.5-flash-002",
+            "gemini-1.5-pro-001",
+            "gemini-1.5-flash-001",
+            
+            # Legacy models
+            "gemini-1.0-pro-002",
+            "gemini-1.0-pro-001",
+        ]
+        
+        # Cache static list too
+        self._update_cache(static_models)
+        
+        return static_models
+    
+    def _is_cache_valid(self) -> bool:
+        """Check if model cache is valid and not expired."""
+        if self._model_cache is None or self._model_cache_timestamp is None:
+            return False
+        
+        import time
+        elapsed = time.time() - self._model_cache_timestamp
+        return elapsed < self._model_cache_ttl
+    
+    def _update_cache(self, models: List[str]):
+        """Update model cache with new data."""
+        import time
+        VertexAIClient._model_cache = models.copy()
+        VertexAIClient._model_cache_timestamp = time.time()
+        logger.debug(f"Model cache updated with {len(models)} models")
+    
+    def refresh_model_cache(self) -> List[str]:
+        """Force refresh the model cache by fetching from API."""
+        logger.info("Force refreshing model cache...")
+        return self.list_available_models(use_api=True, use_cache=False)
+    
+    def list_available_locations(self) -> List[str]:
+        """
+        Get list of available Google Cloud regions for Vertex AI.
+        
+        Returns:
+            List of region names
+        """
+        # Available regions for Vertex AI Gemini API
+        return [
+            "us-central1",           # Iowa, USA
+            "us-east4",              # Northern Virginia, USA
+            "us-west1",              # Oregon, USA
+            "us-west4",              # Nevada, USA
+            "europe-west1",          # Belgium
+            "europe-west2",          # London, UK
+            "europe-west3",          # Frankfurt, Germany
+            "europe-west4",          # Netherlands
+            "asia-northeast1",       # Tokyo, Japan
+            "asia-northeast3",       # Seoul, South Korea
+            "asia-southeast1",       # Singapore
+            "asia-south1",           # Mumbai, India
+            "australia-southeast1",  # Sydney, Australia
+        ]
 
 
 # Global client instance (Singleton pattern)
